@@ -2,7 +2,7 @@ Exception.pm
 
 Exception handling module for Perl
 
-Copyright (c) 1999-2001 Horus Communications Ltd. All rights reserved.
+Copyright (c) 1999-2004 Horus Communications Ltd. All rights reserved.
 This program is free software; you can redistribute it and/or modify it
 under the same terms as Perl itself.
 
@@ -15,14 +15,5 @@ No dependencies, no XS code, so:
 	man 3 Exception
 
 is what you want to know.
-
-Note that you may get a "panic: POPSTACK" error at the end of "make test"
-if you are running Perl older than 5.6.0 - this is caused by a known bug
-in Perl 5.005 that has been fixed for 5.6.0. I've left the module
-dependency as "use 5.005" as this problem doesn't always show up, but if
-you suffer from it, you should upgrade to 5.6.0 (which is a Good Thing
-to do in any case).
-
-Enjoy.
 
 Pete Jordan <pete@skydancer.org.uk>

@@ -1,93 +1,115 @@
-# $Id: Exception.pm,v 1.4 2001/04/05 11:14:23 pete Exp $
+# $Id: Exception.pm,v 1.7 2003/06/22 18:44:30 ramtops Exp $
 
 # Exception handling module for Perl - docs are after __END__
 
-# Copyright (c) 1999-2001 Horus Communications Ltd. All rights reserved.
+# Copyright (c) 1999-2003 Horus Communications Ltd. All rights reserved.
 # This program is free software; you can redistribute it and/or modify it
 # under the same terms as Perl itself.
 
 package Exception;
 
-($VERSION)=q$Revision: 1.4 $=~m/Revision:\s+([^\s]+)/;
-
-require Exporter;
-@ISA=qw(Exporter);
-
-@EXPORT_OK=qw(
-  DEBUG_NONE DEBUG_CONTEXT DEBUG_STACK DEBUG_ALL
-  FRAME_PACKAGE FRAME_FILE FRAME_LINE FRAME_SUBNAME
-  FRAME_HASARGS FRAME_WANTARRAY FRAME_LAST
-  try when except reraise finally confessor
-);
-
-%EXPORT_TAGS=(
-  all    => \@EXPORT_OK,
-  stack  => [qw(try when except reraise finally
-		FRAME_PACKAGE FRAME_FILE FRAME_LINE FRAME_SUBNAME
-		FRAME_HASARGS FRAME_WANTARRAY FRAME_LAST)],
-  debug  => [qw(try when except reraise finally
-		DEBUG_NONE DEBUG_CONTEXT DEBUG_STACK DEBUG_ALL)],
-  try    => [qw(try when except reraise finally)]
-);
-
-
-use 5.005;
+use 5.6.0;
 use strict;
+use warnings;
 
-use vars qw(
-  $mod_perl
-  $initialised
-  $default
-  $oldHandler
-);
+use vars
+  qw($VERSION
+     @EXPORT_TRY @EXPORT_STACK @EXPORT_STRINGIFY @EXPORT_DEBUG @EXPORT_OK
+     %EXPORT_TAGS
+     $mod_perl $initialised $compiling
+     $default
+     $oldHandler
+     @init_hooks);
 
-use constant DEBUG_NONE      => 0;
-use constant DEBUG_CONTEXT   => 1;
-use constant DEBUG_STACK     => 2;
-use constant DEBUG_ALL       => 3;
 
-use constant FRAME_PACKAGE   => 0;
-use constant FRAME_FILE      => 1;
-use constant FRAME_LINE      => 2;
-use constant FRAME_SUBNAME   => 3;
-use constant FRAME_HASARGS   => 4;
-use constant FRAME_WANTARRAY => 5;
-use constant FRAME_LAST      => 5;
+use base qw(Exporter);
+use POSIX qw(strftime);
 
-use overload '""'=>sub {shift->text(2)};
+
+@EXPORT_TRY=qw(try when except reraise finally);
+
+@EXPORT_STACK=
+  qw(FRAME_PACKAGE FRAME_FILE FRAME_LINE FRAME_SUBNAME
+     FRAME_HASARGS FRAME_WANTARRAY FRAME_LAST);
+
+@EXPORT_STRINGIFY=qw(STRINGIFY_STACK STRINGIFY_EXITCATCH);
+@EXPORT_DEBUG=qw(DEBUG_NONE DEBUG_CONTEXT DEBUG_STACK DEBUG_ALL DEBUG_NOSTRIP);
+@EXPORT_OK=(@EXPORT_TRY, @EXPORT_STACK, @EXPORT_STRINGIFY, @EXPORT_DEBUG);
+
+%EXPORT_TAGS=
+  (all       => \@EXPORT_OK,
+   stack     => \@EXPORT_STACK,
+   stringify => \@EXPORT_STRINGIFY,
+   debug     => \@EXPORT_DEBUG,
+   try       => \@EXPORT_TRY);
+
+
+use constant DEBUG_NONE          => 0;
+use constant DEBUG_CONTEXT       => 1;
+use constant DEBUG_STACK         => 2;
+use constant DEBUG_ALL           => 3;
+use constant DEBUG_NOSTRIP       => 4;
+
+use constant FRAME_PACKAGE       => 0;
+use constant FRAME_FILE          => 1;
+use constant FRAME_LINE          => 2;
+use constant FRAME_SUBNAME       => 3;
+use constant FRAME_HASARGS       => 4;
+use constant FRAME_WANTARRAY     => 5;
+use constant FRAME_LAST          => 5;
+
+use constant STRINGIFY_STACK     => 0x100;
+use constant STRINGIFY_EXITCATCH => 0x200;
+
+use overload bool => sub {1};
+use overload '""' => sub {local $@; shift->stringify};
 
 
 sub _clone($);
+sub _stringify($$);
 sub _confess($$);
 
 
-BEGIN {
-  $mod_perl=$ENV{MOD_PERL};
-  require Apache if $mod_perl;
-  $oldHandler='DEFAULT';
+# needed if we're 'use'd (directly or indirectly) in perl-start
+no warnings qw(redefine);
+
+
+sub _resetDefault() {
+  my $debuglevel=$ENV{_DEBUG_LEVEL} || 0;
+  $debuglevel||=DEBUG_NOSTRIP if $compiling;
+  $default=bless {}, 'Exception';
+  $default->{TEXT}=[];
+  $default->{ID}='';
+  $default->{DEBUGLEVEL}=$debuglevel;
+  $default->{STRINGIFY}=\&_stringify;
+  $default->{CONFESS}=[\&_confess];
+  $default->{CODE}=1;
+  $default->{CHECKCGI}=$mod_perl ? 1 : 0;
   $initialised=0;
 }
 
 
-sub finalise() {
-  $initialised=0;
-}
+sub _initialise() {
+  return if $initialised;
+  _resetDefault;
+  $initialised=1;
 
+  Apache->request->register_cleanup(\&_resetDefault)
+    if $mod_perl && exists $ENV{REQUEST_URI};
 
-sub initialise() {
-  unless ($initialised) {
-    $initialised=1;
+  my $handler=$SIG{__DIE__} || 'DEFAULT';
 
-    Apache->request->register_cleanup(\&finalise)
-      if $mod_perl && exists $ENV{REQUEST_URI};
-
-    $default=bless {TEXT=>[]}, 'Exception';
-    $default->id('');
-    $default->debugLevel($ENV{_DEBUG_LEVEL} || 0);
-    $default->confessor([\&_confess]);
-    $default->exitcode(1);
+  unless ($handler eq \&_handler) {
+    $oldHandler=$handler;
+    $SIG{__DIE__}=\&_handler;
   }
 
+  $_->() foreach @init_hooks;
+}
+
+
+sub _default() {
+  _initialise unless $initialised;
   $default
 }
 
@@ -95,6 +117,7 @@ sub initialise() {
 sub _blessed($) {
   my $data=shift;
   my $ref=ref $data;
+  local $SIG{__DIE__}='DEFAULT';
   my $blessed=$ref && eval {$data->isa('UNIVERSAL')};
   return ('', $ref) unless $blessed;
 
@@ -125,15 +148,40 @@ sub _clone($) {
 }
 
 
+sub _cloneException($) {
+  my $error=shift;
+  my $ref=ref $error;
+
+  my %error=map {
+    $_ =>
+      ($_ eq 'STRINGIFY' || $_ eq 'CONFESS') &&
+      (!$error->{$_} || $error->{$_} eq $default->{$_})
+	? undef : _clone $error->{$_}
+
+  } keys %$error;
+
+  my $foo=bless \%error, $ref;
+  $foo
+}
+
+
 sub _isError($) {
   my $error=shift;
+  local $SIG{__DIE__}='DEFAULT';
   ref $error && eval {$error->isa('Exception')}
+}
+
+
+sub _create($) {
+  my $class=shift;
+  return _cloneException $class if _isError $class;
+  my $error=_cloneException _default;
+  bless $error, ref $class || $class
 }
 
 
 sub _handler {
   my $error=shift;
-  initialise unless $initialised;
 
   if (_isError $error) {
     $error->raise(@_);
@@ -142,15 +190,39 @@ sub _handler {
     $text=~tr/\f\n\t\r / /s;
     $text=~s/^ ?(.*?) ?$/$1/;
     $text=~s/^\[.*?\] \w*: ?//;
-    $text=~s/ ?at [\w\/\.\-]+ line \d+(\.$)?//;
-    Exception->raise($text, {ID=>'die'});
+
+    $text=~s/ ?at [\w\/\.\-]+ line \d+(\.$)?//
+      unless _default->{DEBUGLEVEL}&DEBUG_NOSTRIP;
+
+    _default->raise($text, {ID=>'die'});
   }
+}
+
+
+sub _stringifyStack($) {
+  my $error=shift;
+  my $stack=$error->{STACK};
+  return () unless $stack;
+
+  map {
+    "$_->[FRAME_PACKAGE] \t$_->[FRAME_FILE] \t".
+    "line $_->[FRAME_LINE] \t$_->[FRAME_SUBNAME]"
+  } @$stack
+}
+
+
+sub _stringify($$) {
+  my ($error, $option)=@_;
+  return if $option&STRINGIFY_EXITCATCH;
+  my $text=$error->{TEXT};
+  my @stack=$option&STRINGIFY_STACK ? $error->_stringifyStack : ();
+  join '', map {"$_\n"} @$text, (@stack ? ("\nStack trace:", @stack) : ())
 }
 
 
 sub _confess($$) {
   my ($error, $quiet)=@_;
-  print STDERR (scalar $error->text(2)) unless $quiet;
+  print STDERR $error->stringify(STRINGIFY_STACK) unless $quiet;
   $quiet
 }
 
@@ -192,8 +264,7 @@ sub _stackmerge($$) {
 
 sub new($$;$$) {
   my ($class, $id, $text, $extras)=@_;
-  $class=initialise unless _isError $class;
-  my $error=_clone $class;
+  my $error=_create $class;
   $error->{ID}=$id;
 
   if (defined $text) {
@@ -222,10 +293,8 @@ sub new($$;$$) {
 
 sub raise($;$$) {
   my $class=shift;
-  $class=initialise unless _isError $class;
-  my $handler=$SIG{__DIE__};
-  local $SIG{__DIE__}=$handler eq \&_handler ? $oldHandler : \&_handler;
-  my $error=_clone $class;
+  local $SIG{__DIE__}=$oldHandler;
+  my $error=_create $class;
   my $extras=shift;
 
   if (defined $extras) {
@@ -247,7 +316,7 @@ sub raise($;$$) {
     }
   }
 
-  my $debug=$error->{DEBUGLEVEL};
+  my $debug=$error->{DEBUGLEVEL}&DEBUG_ALL;
 
   if ($debug) {
     my ($stack, @stack)=0;
@@ -259,12 +328,26 @@ sub raise($;$$) {
     my $pending=0;
 
     while (my @frame=caller $stack++) {
-      if ($frame[FRAME_PACKAGE] eq 'Exception') {
+      my $package=$frame[FRAME_PACKAGE];
+
+      if ($mod_perl && $debug!=DEBUG_ALL) {
+	next if $package=~m/^Apache::(Registry|PerlRun)$/;
+	next if $package eq 'main' && $frame[FRAME_LINE]==0;
+      }
+
+      if ($package eq 'Exception') {
 	$pending=1
 	  if $debug==DEBUG_CONTEXT &&
 	     $frame[FRAME_SUBNAME] eq 'Exception::raise';
 
 	next if $debug!=DEBUG_ALL;
+      } elsif ($mod_perl && $package=~m/^Apache::ROOT::(.*)$/) {
+	$package=$1;
+	# restore common filename chars
+	$package=~s/_7e/~/g;
+	$package=~s/_2e/./g;
+	$package=~s/_2d/-/g;
+	$frame[FRAME_PACKAGE]=$package;
       }
 
       $frame[FRAME_SUBNAME]=$1 eq '_handler' ? '[die]' : "[$1]"
@@ -287,35 +370,92 @@ sub as($$) {
   my ($error, $template)=@_;
 
   if (_isError $template) {
-    $error->id($template->id);
-    $error->debugLevel($template->debugLevel);
-    $error->confessor($template->confessor);
+    $error->{ID}=$template->{ID};
+    $error->{DEBUGLEVEL}=$template->{DEBUGLEVEL};
+    $error->{CONFESS}=$template->{CONFESS} ? [@{$template->{CONFESS}}] : undef;
     bless $error, ref $template;
   } else {
-    $error->id($template);
+    $error->{ID}=$template;
   }
 
   $error
 }
 
 
-sub text($;$) {
+sub stringifier($;&) {
+  my ($error, $code)=@_;
+
+  if (_isError $error) {
+    $code=$default->{STRINGIFY} if defined $code && !$code;
+  } else {
+    $error=_default;
+    $code=\&_stringify if defined $code && !$code;
+  }
+
+  my $old=$error->{STRINGIFY};
+  $error->{STRINGIFY}=$code if $code;
+  $old
+}
+
+
+sub _matchstack($$$) {
+  my ($frame, $package, $subname)=@_;
+  my @frame=caller($frame+1)        or return 0;
+  $frame[FRAME_PACKAGE] eq $package or return 0;
+  $frame[FRAME_SUBNAME] eq "Exception::$subname" or return 0;
+  1
+}
+
+
+# This is vile in order to deal with uncaught exceptions for any of
+# straight CGI, Apache::PerlRun or Apache::Registry. The first of these
+# is actually the hardest as there seems no way to easily catch that
+# final die - we look at the stack to (hopefully) confirm the right
+# circumstances. The other two cases are easier, as we only need to look
+# at what fired up stringification; we print our error to STDERR and
+# return undef (no error) to prevent the default mod_perl termination
+# handling from being triggered. The 'return undef if ...' at the start
+# is there because Apache::PerlRun stringifies twice.
+#
+# The assumption here is that the programmer has defined their own HTML
+# stringifier and a confessor that outputs to STDOUT, it's up to them
+# to write the page end tags if they get STRINGIFY_EXITCATCH.
+#
+# Needless to say, all this may stop working for future versions of
+# mod_perl; the real answer is for scripts to always catch and deal with
+# exceptions themselves properly, but that's asking too much :)
+#
+sub stringify($;$) {
   my ($error, $option)=@_;
-  $option||=0;
-  my $text=$error->{TEXT};
-  my $stack=$error->{STACK};
-  wantarray and return $option<2 ? @$text : (@$text, $stack);
-  $option==1 and return join "\n", @$text;
-  $option==0 || !$stack || !@$stack and return join '', map {"$_\n"} @$text;
+  return undef if $error->{CHECKCGI}==2;
+  my $stringify=$error->{STRINGIFY} || $default->{STRINGIFY};
+  $option=0 unless defined $option;
 
-  join '',
-    (map {"$_\n"} @$text),
-    "\nStack trace:\n",
-    map {
-      (" $_->[FRAME_PACKAGE] \t$_->[FRAME_FILE] \t",
-       "line $_->[FRAME_LINE] \t$_->[FRAME_SUBNAME]\n")
-    } @$stack
+  $option||=STRINGIFY_EXITCATCH
+    if $error->{CHECKCGI} &&
+       ($mod_perl
+	  ? (caller 1)[FRAME_PACKAGE]=~m/^Apache::(Registry|PerlRun)$/
+	  : (!caller 4) &&
+	    (_matchstack 3, 'main', 'try') &&
+	    (_matchstack 2, 'Exception', 'raise') &&
+	    (_matchstack 1, 'Exception', '__ANON__'));
 
+  my $text=$stringify->($error, $option);
+
+  if ($option&STRINGIFY_EXITCATCH) {
+    my @now=localtime;
+    my @text=@{$error->{TEXT}};
+    $text[0]="$0 : $text[0]";
+    push @text, $error->_stringifyStack if $option&STRINGIFY_STACK;
+    my $header=strftime "[%a %b %d %H:%M:%S %Y] [client] ", @now;
+    my $errstr=join '', map {"$header$_\n"} @text;
+    return $errstr unless $mod_perl;
+    print STDERR $errstr;
+    $error->{CHECKCGI}=2;
+    return undef;
+  }
+
+  $text
 }
 
 
@@ -325,9 +465,26 @@ sub stack($) {
 }
 
 
+sub text($;$) {
+  my ($error, $text)=@_;
+  $error=_default unless _isError $error;
+  my $old=$error->{TEXT};
+
+  if (_isError $text) {
+    push @{$error->{TEXT}}, @{$text->{TEXT}};
+  } elsif (ref $text eq 'ARRAY') {
+    $error->{TEXT}=$text;
+  } elsif ($text) {
+    push @{$error->{TEXT}}, $text;
+  }
+
+  $old
+}
+
+
 sub debugLevel($;$) {
   my ($error, $newLevel)=@_;
-  $error=initialise unless _isError $error;
+  $error=_default unless _isError $error;
   my $oldLevel=$error->{DEBUGLEVEL};
   $error->{DEBUGLEVEL}=$newLevel if defined $newLevel;
   $oldLevel
@@ -336,7 +493,7 @@ sub debugLevel($;$) {
 
 sub id($;$) {
   my ($error, $newId)=@_;
-  $error=initialise unless _isError $error;
+  $error=_default unless _isError $error;
   my $oldId=$error->{ID};
   $error->{ID}=$newId if defined $newId;
   $oldId
@@ -345,7 +502,7 @@ sub id($;$) {
 
 sub exitcode($;$) {
   my ($error, $newCode)=@_;
-  $error=initialise unless _isError $error;
+  $error=_default unless _isError $error;
   my $oldCode=$error->{CODE};
   $error->{CODE}=$newCode if defined $newCode;
   $oldCode
@@ -357,9 +514,9 @@ sub confessor($;&) {
   my $replace=ref $code eq 'ARRAY';
 
   if (_isError $error) {
-    $code=$default->confessor if $replace && !@$code;
+    $code=$default->{CONFESS} if $replace && !@$code;
   } else {
-    $error=initialise;
+    $error=_default;
     $code=[\&_confess] if $replace && !@$code;
   }
 
@@ -377,11 +534,12 @@ sub confessor($;&) {
 
 sub confess($) {
   my $error=shift;
+  my $confess=$error->{CONFESS} || $default->{CONFESS};
   my $quiet=0;
 
-  foreach (reverse @{$error->{CONFESS}}) {
+  foreach (reverse @$confess) {
     next unless ref $_ eq 'CODE';
-    $quiet=&$_($error, $quiet);
+    $quiet=$_->($error, $quiet);
     $quiet=0 unless defined $quiet;
     last if $quiet<0;
   }
@@ -390,24 +548,56 @@ sub confess($) {
 
 sub croak($;$) {
   my ($error, $exitcode)=@_;
-  $exitcode=$error->exitcode unless defined $exitcode;
+  $exitcode=$error->{CODE} unless defined $exitcode;
   $error->confess;
   exit $exitcode;
+}
+
+
+sub registerDefault($) {
+  my $class=shift;
+  $class=ref $class if ref $class;
+  _initialise unless $initialised;
+  bless $default, $class;
+}
+
+
+sub initHook($&) {
+  my ($class, $hook)=@_;
+
+  foreach (@init_hooks) {
+    return 0 if $_ eq $hook;
+  }
+
+  push @init_hooks, $hook;
+  1
+}
+
+
+sub checkCGI($;$) {
+  my ($error, $new)=@_;
+  $error=_default unless _isError $error;
+  my $old=$error->{CHECKCGI};
+
+  $error->{CHECKCGI}=$new ? 1 : 0
+    if defined $new && !$mod_perl;
+
+  $old
 }
 
 
 sub _matches($@) {
   my $error=shift;
 
-  foreach (@_) {
-    my $ref=ref $_;
+  foreach my $test (@_) {
+    my $ref=ref $test;
 
     if ($ref eq 'Regexp') {
-      $error->text=~$_ and return 1;
-    } elsif (_isError $_) {
-      ref $error eq $ref && $error->{ID} eq $_->{ID} and return 1;
+      m/$test/ and return 1 foreach @{$error->{TEXT}};
+    } elsif (_isError $test) {
+      ref $error eq $ref && $error->{ID} eq $test->{ID} and return 1;
     } else {
-      $error->id eq $_ and return 1;
+      $error->id eq $test and return 1;
     }
   }
 
@@ -417,8 +607,19 @@ sub _matches($@) {
 
 sub try(&;$) {
   my ($try, $actions)=@_;
-  initialise unless $initialised;
-  my $retval=eval {&$try};
+  _initialise unless $initialised;
+  my @caller=caller;
+  my $ret=wantarray ? 2 : defined wantarray ? 1 : 0;
+  my @retval;
+
+  if ($ret>1) {
+    @retval=eval {$try->()};
+  } elsif ($ret) {
+    $retval[0]=eval {$try->()};
+  } else {
+    eval {$try->()};
+  }
+
   my $error=$@;
   my $propagate;
 
@@ -444,7 +645,13 @@ sub try(&;$) {
 	    goto FINALLY;
 	  }
 
-	  $retval=eval {&$code($error, $retval)};
+	  if ($ret>1) {
+	    @retval=eval {$@=$error; $code->($error, @retval)};
+	  } elsif ($ret) {
+	    $retval[0]=eval {$@=$error; $code->($error, $retval[1])};
+	  } else {
+	    eval {$@=$error; $code->($error)};
+	  }
 
 	  if ($@) {
 	    $propagate=$@;
@@ -470,7 +677,13 @@ sub try(&;$) {
 	  goto FINALLY;
 	}
 
-	$retval=eval{&$_($error, $retval)};
+	if ($ret>1) {
+	  @retval=eval {$@=$error; $_->($error, @retval)};
+	} elsif ($ret) {
+	  $retval[0]=eval {$@=$error; $_->($error, $retval[1])};
+	} else {
+	  eval {$@=$error; $_->($error)};
+	}
 
 	if ($@) {
 	  $propagate=$@;
@@ -485,7 +698,13 @@ sub try(&;$) {
 
   if ($finally) {
     foreach (reverse @$finally) {
-      $retval=eval{&$_($error, $retval)};
+      if ($ret>1) {
+	@retval=eval {$_->($error, @retval)};
+      } elsif ($ret) {
+	$retval[0]=eval {$_->($error, $retval[1])};
+      } else {
+	eval {$_->($error)};
+      }
 
       if ($@) {
 	if ($propagate) {
@@ -493,7 +712,7 @@ sub try(&;$) {
 	  # reraise or an exception in an except block (or, indeed, an
 	  # exception in an earlier finally block); merging the exceptions
 	  # is the least bad course of action
-	  push @{$propagate->{TEXT}}, $@->{TEXT};
+	  push @{$propagate->{TEXT}}, @{$@->{TEXT}};
 	  $propagate->_stackmerge($@->{STACK});
 	} else {
 	  $propagate=$@;
@@ -503,7 +722,7 @@ sub try(&;$) {
   }
 
   $propagate->raise if $propagate;
-  $retval
+  $ret>1 ? @retval : $ret ? $retval[0] : undef
 }
 
 
@@ -539,14 +758,21 @@ sub finally(&;$) {
 }
 
 
-INIT {
-  my $handler=$SIG{__DIE__} || 'DEFAULT';
+BEGIN {
+  ($VERSION)=q$Revision: 1.7 $=~m/Revision:\s+([^\s]+)/;
+  $mod_perl=$ENV{MOD_PERL};
 
-  unless ($handler eq \&_handler) {
-    $oldHandler=$handler;
-    $SIG{__DIE__}=\&_handler;
+  if ($mod_perl) {
+    require Apache;
+    import Apache qw(exit);
   }
+
+  $compiling=1;
+  _resetDefault;
 }
+
+
+INIT {$compiling=0}
 
 
 1
@@ -567,13 +793,16 @@ __END__
     try {
       $err->raise('error text');
       die 'dead';
-    } when $err, except {
-        my $error=shift;
+    }
+    when $err, except {
+	my $error=shift;
 	$error->confess;
       }
-      when 'die', reraise
-      except {shift->croak}
-      finally {
+    when 'die', reraise
+    except {
+	shift->croak;
+      }
+    finally {
 	print STDERR "Tidying up\n";
       };
 
@@ -587,8 +816,8 @@ implements a structured exception handling syntax as summarised above.
 
 B<Exception> installs a C<$SIG{__DIE__}> handler that converts text
 passed to I<die> into an exception object. Stringification for the object
-is mapped onto the L<confess|"confess"> method which, by default, will simply print
-the error text on to I<STDERR>.
+is mapped onto the L<stringify|"stringify"> method so, by default, Perl
+will simply print the error text on to I<STDERR> on termination.
 
 =head2 Structured Exception Handling
 
@@ -612,7 +841,7 @@ B<Exception> can be persuaded to capture and display a stack trace
 globally, by exception object or explicitly when an exception is raised.
 You can capture just the context at which the exception is raised, a full
 stack trace or an absolutely full stack trace including calls within the
-B<Exception> module itself.
+B<Exception> module itself (and, if appropriate, within mod_perl).
 
 =head1 EXCEPTION OBJECTS
 
@@ -689,7 +918,8 @@ For example:
 
   try {
     $err->raise('bar');
-  } when ['foo', qr/bar/, $err], except {
+  }
+  when ['foo', qr/bar/, $err], except {
       shift->croak;
     };
 
@@ -705,8 +935,9 @@ For example:
 
   try {
     <code>
-  } when 'die', reraise
-    except {
+  }
+  when 'die', reraise
+  except {
       <other exceptions>
     };
 
@@ -724,8 +955,9 @@ L<as|"as"> method performs this function:
   try {
     <calls to other code that might raise exceptions>
     <local code that might raise $myErr exceptions>
-  } when $myErr, reraise
-    except {
+  }
+  when $myErr, reraise
+  except {
       shift->as($myErr)->raise('extra text');
     };
 
@@ -750,10 +982,11 @@ blocks have been executed:
 
   try {
     <code>
-  } except {
+  }
+  except {
       <exception handling>
     }
-    finally {
+  finally {
       <housekeeping code>
     }
 
@@ -771,11 +1004,12 @@ For example:
   my $value=try {
     <code>
     return 1;
-  } except {
+  }
+  except {
       <code>
       return 0;
     }
-    finally {
+  finally {
       my ($error, $retval)=@_;
       <code>
       return $retval;
@@ -895,29 +1129,13 @@ may be applied in the same statement:
 
   $err1->as('foo')->raise;
 
-=head2 text
+=head2 stringify
 
-  my $text=$err->text;
-  my @text=$err->text;
-  my $textAndStack=$err->text(2);
+  my $text=$err->stringify;
+  my $text=$err->stringify(1);
 
-Return the text and, optionally, any saved stack trace of an exception object.
-I<text> can take a parameter (which defaults to C<0>) and can be called in
-scalar or list context:
-
-  param  scalar                      list
-
-  0      line1 \n line2 \n           (line1, line2)
-  1      line1 \n line2              (line1, line2)
-  2      line1 \n line2 \n stack \n  (line1, line2, stack)
-
-Be careful about context: C<< print $err->text; >> probably won't do what you want;
-you almost certainly meant C<< print scalar($err->text); >>.
-
-An exception gains a line every time it is L<raise|"raise">d with a text parameter.
-Actually, to be precise, L<raise|"raise"> creates a new exception object with the
-extra line, but that's the sort of implementation detail you don't need to
-know, unless of course you want to...
+Return the text and any saved stack trace of an exception object. the optional
+parameter is a bitmask,
 
 =head2 stack
 
@@ -936,6 +1154,24 @@ To use these names, you need to import their definitions:
   use Exception qw(:all);
 
 will do what you want.
+
+=head2 text
+
+  my $text=$err->text;
+  my $defaultText=Exception->text;
+  my $old=$err->text($new);
+  my $oldDefault=Exception->text($new);
+
+Get or set the text of an exception. The routines all return a reference to
+the array of error text strings held in the B<Exception> object before the
+call. If I<text> is passed a text string, that text is added to the end of the
+array; if I<text> is passed a reference to an array of strings, the array is
+B<replaced> by the one given.
+
+An exception also gains a line every time it is L<raise|"raise">d with a text parameter.
+Actually, to be precise, L<raise|"raise"> creates a new exception object with the
+extra line, but that's the sort of implementation detail you don't need to
+know, unless of course you want to...
 
 =head2 debugLevel
 
@@ -964,6 +1200,11 @@ passed a reference to an array of coderefs, the array is B<replaced> by the
 one given. As a special case, if the array given is empty, the set of confessor
 routines is reset to the default.
 
+A useful example of a confessor would be code that printed an exception on
+I<STDOUT> instead of I<STDERR> which, used in conjunction with a
+L<stringifier|"stringifier"> that generated HTML, could be used within CGI
+scripts.
+
 A confessor routine is passed two parameters when called: the exception
 object and a I<quiet> flag; if this is non-zero, the routine is expected not
 to produce any output. The routine should return the new value of the flag:
@@ -974,9 +1215,39 @@ As a trivial example, here's the default routine provided:
 
   sub _confess($$) {
     my ($error, $quiet)=@_;
-    print STDERR (scalar $error->text(2)) unless $quiet;
+    print STDERR $error->stringify unless $quiet;
     $quiet
   }
+
+=head2 stringifier
+
+  my $code=$err->stringifier;
+  my $defaultCode=Exception->stringifier;
+  my $old=$err->stringifier($new);
+  my $oldDefault=Exception->stringifier($new);
+
+Get or set the code to stringify an exception object. This code will be called
+by the stringification overloading and by the L<stringify|"stringify"> and
+default L<confess|"confess"> methods (the latter is also called by the
+<L<croak|"croak"> method).
+
+Your stringifier routine takes two parameters: the exception object and the
+option parameter passed to the L<stringify|"stringify"> method; import
+I<:stringify> to get the symbolic bit names into your code:
+
+=over 4
+
+=item STRINGIFY_NOSTACK
+
+return just the text even if a stack trace is available.
+
+=item STRINGIFY_EXITCATCH
+
+this bit shouldn't be set in user code; it will be set for you for mod_perl
+scripts (and CGI scripts if you've set L<checkCGI|"checkCGI">) if your script
+is exiting with an uncaught exception.
+
+=back
 
 =head2 id
 
@@ -1008,9 +1279,9 @@ C<1>.
 
   $err->confess;
 
-Display the exception using the list of L<confessor|"confessor"> routines
-it contains. By default, this will display the exception text followed by
-the stack trace (if one exists) on I<STDERR>.
+Display the exception using the list of L<confessor|"confessor"> routines it
+contains. By default, this will print the L<stringified|"stringify"> exception
+on I<STDERR>.
 
 =head2 croak
 
@@ -1020,6 +1291,36 @@ the stack trace (if one exists) on I<STDERR>.
 Call the exception's L<confess|"confess"> method and terminate. If no exit code is
 supplied, exit with the exception's exit code as set by the L<exitcode|"exitcode">
 method.
+
+=head2 registerDefault
+
+  package MyError;
+  @ISA=qw(Exception);
+  use Exception qw(:all);
+  BEGIN {MyError->registerDefault}
+
+This package method reblesses the default and die exception objects as being
+members of a subclass. This is intended for subclasses that reimplement the
+L<stringify|"stringify"> method for a particular environment (typically a CGI
+script) so that the default handling, in the absence of a caught try block, for
+the inbuilt anonymous and die exception objects uses the subclassed
+L<stringify|"stringify"> to render the exception.
+
+Clearly, the last package that invokes this method gets the objects.
+
+=head1 COMPATIBILTY
+
+Code written prior to version 1.5 that calls the I<text> method will need
+rewriting:
+
+ 1.4 and earlier                         1.5 and later
+
+ scalar $err->text or $err->text(0)      => $err->stringify(1)
+        $err->text(1)                    => join "\n", @{$err->text}
+        $err->text(2)                    => $err->stringify or "$err"
+
+ list   $err->text or $err->text(0 or 1) => @{$err->text}
+        $err->text(2)                    => (@{$err->text}, $err->stack)
 
 =head1 BUGS
 
