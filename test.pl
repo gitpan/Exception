@@ -28,6 +28,7 @@ try {
 };
 if(catch(qw(Test::Exception e))) {
   #print $e->as_string(),"\n";
+  #print "e: $e\n";
   print "ok 2 [catch typed exception]\n";
 }
 elsif(catch(qw(Exception e))) {
@@ -36,6 +37,15 @@ elsif(catch(qw(Exception e))) {
 else {
   print "not ok 2 [catch typed excption]\n";
 }
+
+=for foobar
+try {
+};
+catch qw(Exception e) {
+};
+catch {
+};
+=cut
 
 try {
   throw(new Test::Exception(q(This is supposed to happen (I know it's ugly).)));

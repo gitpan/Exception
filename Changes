@@ -1,5 +1,8 @@
 Revision history for Perl extension Exception.
 
+1.01  Thu Jun  8 10:02:46 EDT 2000
+        - added 'use overload "\"\"" => "as_string";' to overload the
+          stringification operator.
 0.01  Fri Jun  2 09:26:54 2000
 	- original version; created by h2xs 1.19
 

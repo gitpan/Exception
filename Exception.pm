@@ -2,12 +2,13 @@ package Exception;
 
 use strict;
 use vars qw($VERSION @ISA @EXPORT_OK);
+use overload "\"\"" => "as_string";
 
 require Exporter;
 
 @ISA       = qw(Exporter);
 @EXPORT_OK = qw( try throw catch rethrow );
-$VERSION   = '1.00';
+$VERSION   = '1.01';
 
 # Preloaded methods go here.
 
@@ -138,10 +139,11 @@ sub when
 #   open FILE, '</not/a/file/' or throw(new Exception('Error: ',$!,"\n"));
 # };
 #
+# try $s;
+#
 sub try (&)
 {
-  my $try = shift;
-  eval { &$try };
+  eval { &{$_[0]} };
 }
 
 #
@@ -402,6 +404,28 @@ Then use the new type:
   elsif(catch()) {
     # caught something else...
   }
+
+=head1 IMPLEMENTATION CONSIDERATIONS
+
+I wanted to stay away from having to call eval() too much.  It is possible
+to produce syntax that looks alot closer to C++ and Java, but it would
+have come at the cost of using eval more often.  If for example, eval() was
+used for catch() blocks then we don't really have the ability to 
+rethrow() a caught exception (since it's in an eval itself, it's throw
+gets captured in $@).  This path started leading to a level of complexity
+that seemed unnecessary.  
+
+That is the same reason the decision to leave out finally() blocks.  For
+a finally block to be properly implemented, eval would almost have been
+a necessity.  Whe do you call the finally block?  Right after the try?  What
+if the finally block throws an exception?  That situation would overwrite 
+the try block's exception, which is probably undesierable.  Waiting to
+call the finally block untill all of the catches were finished is also
+a difficult nut to crack.
+
+These other syntaxes would also have make it harder to catch coding or 
+syntax errors at compile time -- which is something that is usualy 
+preferred to delaying them untill runtime.
 
 =head1 AUTHOR
 
