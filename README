@@ -1,51 +1,28 @@
-README for Exception 1.00
-=========================
+Exception.pm
 
-This module is an attempt at a standardized methodology
-for exception handling for Perl.  One of the issues
-I've had to deal with when advocating Perl is it's lack of,
-or strange looking exception handling mechanisim.  The
-lack of exception objects was a recent thorn.  This module
-attempts to provide a nice looking, feature rich exception
-system.
+Exception handling module for Perl
 
-Example
-=======
+Copyright (c) 1999-2001 Horus Communications Ltd. All rights reserved.
+This program is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.
 
-use Exception qw(try catch throw);
+No dependencies, no XS code, so:
 
-try { throw(new Exception('Error.')); };
-if(catch(qw(Exception e))) {
-  print 'Caught: ',$e->as_string(),"\n";
-}
-elsif(catch()) {
-  print 'Caught Unknown: ',$@,"\n";
-}
+	perl Makefile.PL
+	make
+	make test
+	make install
+	man 3 Exception
 
+is what you want to know.
 
-Installation Notes
-==================
+Note that you may get a "panic: POPSTACK" error at the end of "make test"
+if you are running Perl older than 5.6.0 - this is caused by a known bug
+in Perl 5.005 that has been fixed for 5.6.0. I've left the module
+dependency as "use 5.005" as this problem doesn't always show up, but if
+you suffer from it, you should upgrade to 5.6.0 (which is a Good Thing
+to do in any case).
 
-The Exceptoin module compiles, tests, and installs just like
-other standard Perl modules.
+Enjoy.
 
-        $ perl Makefile.PL
-        $ make
-        $ make test
-        $ make install
-
-To install the extension in a private directory, you can use the
-PREFIX option when creating Makefile.PL.
-
-
-Miscellaneous
-=============
-
-Copyright (c) 2000 Kyle R. Burton. All rights reserved. 
-This program is free software; you can redistribute it 
-and/or modify it under the same terms as Perl itself.
-
-
-June 2nd, 2000
-Kyle R. Burton
-mortis@voicenet.com
+Pete Jordan <pete@skydancer.org.uk>
